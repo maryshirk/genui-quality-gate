@@ -3,9 +3,10 @@ import os
 import subprocess
 import time
 import tomllib
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 
@@ -31,7 +32,7 @@ def wait_health(expected_status: int, timeout: float = 45) -> dict[str, Any]:
             last_result = (status, payload)
             if status == expected_status:
                 return payload
-        except (URLError, TimeoutError) as error:
+        except (OSError, HTTPException) as error:
             last_result = str(error)
         time.sleep(0.5)
     raise AssertionError(f"Health did not reach HTTP {expected_status}: {last_result}")

@@ -19,8 +19,14 @@ services:
       GENUI_DATABASE_URL: postgresql://${POSTGRES_USER:-genui}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-genui}
       GENUI_HEALTH_TIMEOUT_SECONDS: "2"
       GENUI_DB_SHUTDOWN_TIMEOUT_SECONDS: "2"
+      GENUI_MODEL_ENABLED: ${GENUI_MODEL_ENABLED:-true}
+      GENUI_TRACKING_URI: http://mlflow:5000
+      GENUI_MODEL_NAME: ${GENUI_MODEL_NAME:-genui-pairwise-quality}
+      GENUI_MODEL_ALIAS: ${GENUI_MODEL_ALIAS:-champion}
     depends_on:
       postgres:
+        condition: service_healthy
+      mlflow:
         condition: service_healthy
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
@@ -29,6 +35,75 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.0
+    stop_grace_period: 15s
+    logging: *logging
+
+  mlflow:
+    image: genui-mlflow:local
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    init: true
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg://mlflow:${MLFLOW_POSTGRES_PASSWORD:?Set MLFLOW_POSTGRES_PASSWORD in .env}@mlflow-db:5432/mlflow
+      MLFLOW_ENABLE_ASYNC_LOGGING: "false"
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    command:
+      - mlflow
+      - server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --workers
+      - "1"
+      - --serve-artifacts
+      - --artifacts-destination
+      - /mlartifacts
+      - --allowed-hosts
+      - "localhost:*,127.0.0.1:*,mlflow:5000"
+      - --cors-allowed-origins
+      - "http://localhost:${MLFLOW_PORT:-5001},http://127.0.0.1:${MLFLOW_PORT:-5001}"
+    depends_on:
+      mlflow-db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5001}:5000"
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    networks: [backend]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.0
+    stop_grace_period: 15s
+    logging: *logging
+
+  mlflow-db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: ${MLFLOW_POSTGRES_PASSWORD:?Set MLFLOW_POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: mlflow
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - mlflow_backend:/var/lib/postgresql/data
+    networks: [backend]
     mem_limit: 256m
     cpus: 1.0
     stop_grace_period: 15s
@@ -58,6 +133,8 @@ services:
 
 volumes:
   postgres_data:
+  mlflow_backend:
+  mlflow_artifacts:
 
 networks:
   backend:

@@ -30,6 +30,8 @@ artifacts/
 data/
 models/
 mlruns/
+mlartifacts/
+mlflow.db*
 *.onnx
 *.pt
 *.pkl

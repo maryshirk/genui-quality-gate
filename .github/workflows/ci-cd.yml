@@ -3,7 +3,7 @@ name: CI and publish
 on:
   pull_request:
   push:
-    branches: [main, feat/project-bootstrap]
+    branches: [main, feat/project-bootstrap, feat/mlflow-pipeline]
     tags: ['v*']
 
 permissions:
@@ -42,12 +42,12 @@ jobs:
         with:
           version: '0.12.24'
           enable-cache: true
-      - run: uv sync --locked
+      - run: uv sync --locked --group ml
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
-      - run: uv run --locked mypy
+      - run: uv run --locked --group ml mypy
       - run: uv run --locked pre-commit run --all-files
-      - run: uv run --locked pytest --cov --cov-report=term-missing --cov-report=xml
+      - run: uv run --locked --group ml pytest --cov --cov-report=term-missing --cov-report=xml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
@@ -59,9 +59,13 @@ jobs:
     name: Build once and test Compose
     needs: quality
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       POSTGRES_PASSWORD: ci-test-password
+      MLFLOW_POSTGRES_PASSWORD: ci-mlflow-password
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5001
+      GENUI_MODEL_ENABLED: 'true'
+      GENUI_MODEL_NAME: genui-pairwise-quality-smoke
       GENUI_IMAGE: genui-quality-gate:ci
       BUILD_SHA: ${{ github.sha }}
     steps:
@@ -72,17 +76,27 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: '0.12.24'
+          enable-cache: true
       - name: Validate package and release versions
         id: meta
         run: python scripts/image_metadata.py --github-output "$GITHUB_OUTPUT"
-      - name: Build and start application and database
+      - name: Start MLflow with separate metadata and artifact stores
+        run: docker compose up --build --wait --wait-timeout 180 postgres mlflow
+      - name: Train synthetic smoke runs and register model versions
+        run: uv run --locked --group ml python -m scripts.mlflow_smoke seed
+      - name: Build and start application
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
-        run: docker compose up --build --wait --wait-timeout 120
+        run: docker compose up --build --wait --wait-timeout 180 app
       - name: Verify endpoints, non-root user, database outage and recovery
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
         run: python scripts/container_smoke.py
+      - name: Verify inference, alias switch and startup-only model loading
+        run: uv run --locked --group ml python -m scripts.mlflow_smoke verify
       - name: Save tested image
         if: github.event_name == 'push'
         run: docker save "$GENUI_IMAGE" | gzip > tested-image.tar.gz
@@ -107,6 +121,7 @@ jobs:
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' ||
        github.ref == 'refs/heads/feat/project-bootstrap' ||
+       github.ref == 'refs/heads/feat/mlflow-pipeline' ||
        startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10

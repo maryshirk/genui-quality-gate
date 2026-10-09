@@ -25,6 +25,9 @@ LABEL org.opencontainers.image.title="genui-quality-gate" \
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    XDG_CACHE_HOME=/tmp/cache \
     GENUI_BUILD_SHA=$BUILD_SHA
 WORKDIR /app
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
@@ -32,6 +35,6 @@ COPY --from=builder /app/.venv /app/.venv
 USER 10001:10001
 EXPOSE 8000
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).close()"]
 CMD ["uvicorn", "genui_quality_gate.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

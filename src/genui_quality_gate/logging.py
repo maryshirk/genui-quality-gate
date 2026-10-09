@@ -12,6 +12,10 @@ _EXTRA_FIELDS = (
     "duration_ms",
     "error_type",
     "component",
+    "model_name",
+    "model_version",
+    "model_alias",
+    "model_run_id",
 )
 
 
