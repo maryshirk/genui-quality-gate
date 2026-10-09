@@ -1,0 +1,63 @@
+name: genui-quality-gate
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    image: ${GENUI_IMAGE:-genui-quality-gate:local}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-development}
+        BUILD_SHA: ${BUILD_SHA:-development}
+    init: true
+    environment:
+      GENUI_DATABASE_URL: postgresql://${POSTGRES_USER:-genui}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-genui}
+      GENUI_HEALTH_TIMEOUT_SECONDS: "2"
+      GENUI_DB_SHUTDOWN_TIMEOUT_SECONDS: "2"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    networks: [backend]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 1.0
+    stop_grace_period: 15s
+    logging: *logging
+
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-genui}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-genui}
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [backend]
+    mem_limit: 256m
+    cpus: 1.0
+    stop_grace_period: 15s
+    logging: *logging
+
+volumes:
+  postgres_data:
+
+networks:
+  backend:
