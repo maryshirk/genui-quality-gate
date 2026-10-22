@@ -30,7 +30,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     XDG_CACHE_HOME=/tmp/cache \
     GENUI_BUILD_SHA=$BUILD_SHA
 WORKDIR /app
-RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app \
+    && mkdir /state && chown app:app /state
 COPY --from=builder /app/.venv /app/.venv
 USER 10001:10001
 EXPOSE 8000

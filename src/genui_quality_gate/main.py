@@ -8,9 +8,10 @@ from fastapi import FastAPI
 from genui_quality_gate.api import router
 from genui_quality_gate.config import Settings
 from genui_quality_gate.database import DatabasePool, close_database_pool, create_database_pool
-from genui_quality_gate.inference import LoadedModel, load_model
 from genui_quality_gate.logging import LOGGER_NAME, configure_logging
 from genui_quality_gate.middleware import RequestLoggingMiddleware
+from genui_quality_gate.queue import TaskPublisher, create_broker, declare_topology
+from genui_quality_gate.task_store import PostgresTaskStore
 from genui_quality_gate.version import application_version
 
 type PoolFactory = Callable[[Settings], Awaitable[DatabasePool]]
@@ -21,7 +22,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     pool_factory: PoolFactory = create_database_pool,
-    model_loader: Callable[[Settings], LoadedModel] = load_model,
+    publisher_factory: Callable[..., TaskPublisher] = TaskPublisher,
 ) -> FastAPI:
     configuration = settings if settings is not None else Settings()
 
@@ -35,27 +36,25 @@ def create_app(
         except Exception as exc:
             logger.error("database_pool_unavailable", extra={"error_type": type(exc).__name__})
         application.state.pool = pool
+        broker = None
         try:
-            if configuration.model_enabled:
+            if configuration.queue_enabled:
                 try:
-                    model = await asyncio.to_thread(model_loader, configuration)
+                    broker = create_broker(configuration)
+                    async with asyncio.timeout(configuration.health_timeout_seconds):
+                        await broker.connect()
+                        await declare_topology(broker, configuration)
+                    application.state.publisher = publisher_factory(broker, configuration)
                 except Exception as exc:
-                    logger.error("model_load_failed", extra={"error_type": type(exc).__name__})
-                    raise RuntimeError("Unable to load the configured MLflow model") from None
-                application.state.model = model
-                logger.info(
-                    "model_loaded",
-                    extra={
-                        "model_name": model.metadata.name,
-                        "model_version": model.metadata.version,
-                        "model_alias": model.metadata.alias,
-                        "model_run_id": model.metadata.run_id,
-                    },
-                )
+                    logger.error("broker_unavailable", extra={"error_type": type(exc).__name__})
+            if pool is not None:
+                application.state.task_store = PostgresTaskStore(pool, configuration.max_attempts)
             logger.info("application_started")
             yield
         finally:
-            application.state.model = None
+            application.state.publisher = None
+            if broker is not None:
+                await broker.stop()
             if pool is not None:
                 await close_database_pool(pool, configuration.db_shutdown_timeout_seconds)
             application.state.pool = None
@@ -64,12 +63,13 @@ def create_app(
     application = FastAPI(
         title="GenUI Quality Gate",
         version=application_version(),
-        description="Service foundation for pairwise evaluation of generated interfaces.",
+        description="Asynchronous tasks for pairwise evaluation of generated interfaces.",
         lifespan=lifespan,
     )
     application.state.settings = configuration
     application.state.pool = None
-    application.state.model = None
+    application.state.publisher = None
+    application.state.task_store = None
     application.add_middleware(RequestLoggingMiddleware)
     application.include_router(router)
     return application

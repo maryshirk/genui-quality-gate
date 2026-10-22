@@ -16,6 +16,11 @@ _EXTRA_FIELDS = (
     "model_version",
     "model_alias",
     "model_run_id",
+    "task_id",
+    "attempt",
+    "active_tasks",
+    "prefetch_count",
+    "worker_concurrency",
 )
 
 

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import time
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -48,7 +49,20 @@ def process(payload: dict[str, str]) -> tuple[int, dict[str, Any]]:
     )
     try:
         with urlopen(request, timeout=15) as response:
-            return response.status, json.load(response)
+            accepted = json.load(response)
+        for _ in range(200):
+            try:
+                with urlopen(f"{base_url}{accepted['status_url']}", timeout=5) as response:
+                    result = json.load(response)
+                if result["status"] == "SUCCEEDED":
+                    return 200, result["result"]
+                if result["status"] == "FAILED":
+                    return 500, result
+            except HTTPError as error:
+                if error.code != 404:
+                    raise
+            time.sleep(0.1)
+        raise TimeoutError("Queued inference did not finish")
     except HTTPError as error:
         return error.code, json.load(error)
 
@@ -72,7 +86,8 @@ def verify(tracking_uri: str, model_name: str) -> None:
         client.set_registered_model_alias(model_name, "champion", challenger.version)
         status, unchanged = process(payload)
         assert status == 200 and unchanged["model"] == first["model"], unchanged
-        compose("restart", "app")
+        compose("restart", "worker")
+        time.sleep(4)
         wait_health(200, timeout=120)
         status, switched = process(payload)
         assert status == 200, switched
@@ -86,7 +101,8 @@ def verify(tracking_uri: str, model_name: str) -> None:
             compose("up", "-d", "--wait", "--wait-timeout", "120", "mlflow")
     finally:
         client.set_registered_model_alias(model_name, "champion", champion.version)
-        compose("restart", "app")
+        compose("restart", "worker")
+        time.sleep(4)
         wait_health(200, timeout=120)
     print(
         f"MLflow verified: model={model_name}, versions={champion.version}/{challenger.version}, "

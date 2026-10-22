@@ -1,12 +1,15 @@
 import logging
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from pydantic import BaseModel
 
 from genui_quality_gate.database import ComponentHealth, check_database
-from genui_quality_gate.inference import LoadedModel, ModelMetadata, Prediction
 from genui_quality_gate.logging import LOGGER_NAME
+from genui_quality_gate.queue import QueueUnavailable, TaskPublisher
+from genui_quality_gate.task_store import TaskRepository
+from genui_quality_gate.tasks import AcceptedTask, StoredTask, TaskEnvelope, TaskPayload
 from genui_quality_gate.version import SERVICE_NAME
 
 router = APIRouter()
@@ -21,22 +24,6 @@ class VersionResponse(BaseModel):
     service: str = SERVICE_NAME
     version: str
     revision: str
-    model: ModelMetadata | None = None
-
-
-class ProcessRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    prompt: str = Field(min_length=1, max_length=10_000)
-    html_a: str = Field(min_length=1, max_length=1_000_000)
-    html_b: str = Field(min_length=1, max_length=1_000_000)
-
-    @field_validator("prompt", "html_a", "html_b")
-    @classmethod
-    def reject_blank_text(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Text must not contain only whitespace")
-        return value
 
 
 class HealthComponents(BaseModel):
@@ -60,15 +47,13 @@ async def liveness() -> LivenessResponse:
 @router.get(
     "/api/v1/version",
     tags=["operations"],
-    description="Application package version and revision, with the loaded model identity.",
+    description="Application package version and build revision.",
     response_model_exclude_none=True,
 )
 async def version(request: Request) -> VersionResponse:
-    model: LoadedModel | None = request.app.state.model
     return VersionResponse(
         version=request.app.version,
         revision=request.app.state.settings.build_sha,
-        model=model.metadata if model is not None else None,
     )
 
 
@@ -90,16 +75,51 @@ async def health(request: Request, response: Response) -> HealthResponse:
     )
 
 
-@router.post("/process", tags=["inference"])
-async def process(payload: ProcessRequest, request: Request) -> Prediction:
-    model: LoadedModel | None = request.app.state.model
-    if model is None:
-        raise HTTPException(status_code=503, detail="Model is not loaded")
-    try:
-        return await model.predict(payload.prompt, payload.html_a, payload.html_b)
-    except Exception as exc:
-        logger.error(
-            "inference_failed",
-            extra={"error_type": type(exc).__name__, "request_id": request.state.request_id},
+@router.post("/process", status_code=202, tags=["tasks"])
+@router.post("/api/v1/tasks", status_code=202, tags=["tasks"])
+async def process(
+    payload: TaskPayload,
+    request: Request,
+    response: Response,
+    idempotency_key: Annotated[UUID | None, Header()] = None,
+) -> AcceptedTask:
+    publisher: TaskPublisher | None = request.app.state.publisher
+    retry_after = str(request.app.state.settings.retry_after_seconds)
+    if publisher is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Task queue unavailable",
+            headers={"Retry-After": retry_after},
         )
-        raise HTTPException(status_code=500, detail="Model inference failed") from None
+    task = TaskEnvelope(payload=payload)
+    if idempotency_key is not None:
+        task.task_id = idempotency_key
+    try:
+        await publisher.publish(task)
+    except QueueUnavailable:
+        logger.warning("task_load_shed", extra={"request_id": request.state.request_id})
+        raise HTTPException(
+            status_code=503,
+            detail="Task queue full or temporarily unavailable",
+            headers={"Retry-After": retry_after, "X-Task-ID": str(task.task_id)},
+        ) from None
+    location = f"/api/v1/tasks/{task.task_id}"
+    response.headers["Location"] = location
+    return AcceptedTask(task_id=task.task_id, status_url=location)
+
+
+@router.get("/api/v1/tasks/{task_id}", tags=["tasks"])
+async def task_result(task_id: UUID, request: Request) -> StoredTask:
+    store: TaskRepository | None = request.app.state.task_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="Result storage unavailable")
+    try:
+        result = await store.get(task_id)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Result storage unavailable") from None
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Result not available yet or task ID unknown",
+        )
+    return result

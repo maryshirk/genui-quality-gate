@@ -19,14 +19,16 @@ services:
       GENUI_DATABASE_URL: postgresql://${POSTGRES_USER:-genui}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-genui}
       GENUI_HEALTH_TIMEOUT_SECONDS: "2"
       GENUI_DB_SHUTDOWN_TIMEOUT_SECONDS: "2"
-      GENUI_MODEL_ENABLED: ${GENUI_MODEL_ENABLED:-true}
-      GENUI_TRACKING_URI: http://mlflow:5000
-      GENUI_MODEL_NAME: ${GENUI_MODEL_NAME:-genui-pairwise-quality}
-      GENUI_MODEL_ALIAS: ${GENUI_MODEL_ALIAS:-champion}
+      GENUI_QUEUE_ENABLED: "true"
+      GENUI_RABBIT_URL: amqp://genui:${RABBITMQ_PASSWORD:-local-rabbit-change-me}@rabbitmq:5672/
+      GENUI_QUEUE_NAME: ${GENUI_QUEUE_NAME:-genui.tasks}
+      GENUI_QUEUE_CAPACITY: ${GENUI_QUEUE_CAPACITY:-20}
+      GENUI_BACKPRESSURE_ENABLED: ${GENUI_BACKPRESSURE_ENABLED:-true}
+      GENUI_INFERENCE_DELAY_SECONDS: ${GENUI_INFERENCE_DELAY_SECONDS:-0.25}
     depends_on:
       postgres:
         condition: service_healthy
-      mlflow:
+      rabbitmq:
         condition: service_healthy
     ports:
       - "127.0.0.1:${APP_PORT:-8000}:8000"
@@ -38,6 +40,94 @@ services:
     mem_limit: 1g
     cpus: 1.0
     stop_grace_period: 15s
+    logging: *logging
+
+  worker:
+    image: ${GENUI_IMAGE:-genui-quality-gate:local}
+    command: [uvicorn, genui_quality_gate.worker:create_worker_app, --factory, --host, 0.0.0.0, --port, "8001", --no-access-log, --timeout-graceful-shutdown, "70"]
+    init: true
+    environment:
+      GENUI_DATABASE_URL: postgresql://${POSTGRES_USER:-genui}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-genui}
+      GENUI_TRACKING_URI: http://mlflow:5000
+      GENUI_MODEL_NAME: ${GENUI_MODEL_NAME:-genui-pairwise-quality}
+      GENUI_MODEL_ALIAS: ${GENUI_MODEL_ALIAS:-champion}
+      GENUI_RABBIT_URL: amqp://genui:${RABBITMQ_PASSWORD:-local-rabbit-change-me}@rabbitmq:5672/
+      GENUI_QUEUE_NAME: ${GENUI_QUEUE_NAME:-genui.tasks}
+      GENUI_QUEUE_CAPACITY: ${GENUI_QUEUE_CAPACITY:-20}
+      GENUI_BACKPRESSURE_ENABLED: ${GENUI_BACKPRESSURE_ENABLED:-true}
+      GENUI_PREFETCH_COUNT: ${GENUI_PREFETCH_COUNT:-1}
+      GENUI_WORKER_CONCURRENCY: ${GENUI_WORKER_CONCURRENCY:-1}
+      GENUI_INFERENCE_DELAY_SECONDS: ${GENUI_INFERENCE_DELAY_SECONDS:-0.25}
+      GENUI_MAX_ATTEMPTS: ${GENUI_MAX_ATTEMPTS:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1::8001"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 60s
+    networks: [backend]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.0
+    stop_grace_period: 75s
+    logging: *logging
+
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    environment:
+      RABBITMQ_DEFAULT_USER: genui
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-local-rabbit-change-me}
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: -rabbit collect_statistics_interval 1000
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks: [backend]
+    mem_limit: 512m
+    cpus: 1.0
+    stop_grace_period: 30s
+    logging: *logging
+
+  source:
+    image: ${GENUI_IMAGE:-genui-quality-gate:local}
+    profiles: [batch]
+    command: [python, -m, genui_quality_gate.source, /data/tasks.jsonl, --checkpoint, /state/checkpoint.json]
+    init: true
+    environment:
+      GENUI_RABBIT_URL: amqp://genui:${RABBITMQ_PASSWORD:-local-rabbit-change-me}@rabbitmq:5672/
+      GENUI_QUEUE_NAME: ${GENUI_QUEUE_NAME:-genui.tasks}
+      GENUI_QUEUE_CAPACITY: ${GENUI_QUEUE_CAPACITY:-20}
+      GENUI_BACKPRESSURE_ENABLED: ${GENUI_BACKPRESSURE_ENABLED:-true}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./data/pipeline:/data:ro
+      - source_state:/state
+    networks: [backend]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    cpus: 1.0
     logging: *logging
 
   mlflow:
@@ -132,6 +222,8 @@ services:
     logging: *logging
 
 volumes:
+  rabbitmq_data:
+  source_state:
   postgres_data:
   mlflow_backend:
   mlflow_artifacts:

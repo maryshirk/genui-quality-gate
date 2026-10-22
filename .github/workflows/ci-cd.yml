@@ -3,7 +3,7 @@ name: CI and publish
 on:
   pull_request:
   push:
-    branches: [main, feat/project-bootstrap, feat/mlflow-pipeline]
+    branches: [main, feat/project-bootstrap, feat/mlflow-pipeline, feat/rabbitmq-backpressure]
     tags: ['v*']
 
 permissions:
@@ -31,6 +31,7 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       TEST_DATABASE_URL: postgresql://genui:ci-test-password@127.0.0.1:5432/genui
+      RUN_CONTAINER_TESTS: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -64,7 +65,6 @@ jobs:
       POSTGRES_PASSWORD: ci-test-password
       MLFLOW_POSTGRES_PASSWORD: ci-mlflow-password
       MLFLOW_TRACKING_URI: http://127.0.0.1:5001
-      GENUI_MODEL_ENABLED: 'true'
       GENUI_MODEL_NAME: genui-pairwise-quality-smoke
       GENUI_IMAGE: genui-quality-gate:ci
       BUILD_SHA: ${{ github.sha }}
@@ -84,13 +84,13 @@ jobs:
         id: meta
         run: python scripts/image_metadata.py --github-output "$GITHUB_OUTPUT"
       - name: Start MLflow with separate metadata and artifact stores
-        run: docker compose up --build --wait --wait-timeout 180 postgres mlflow
+        run: docker compose up --build --wait --wait-timeout 180 postgres mlflow rabbitmq
       - name: Train synthetic smoke runs and register model versions
         run: uv run --locked --group ml python -m scripts.mlflow_smoke seed
       - name: Build and start application
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
-        run: docker compose up --build --wait --wait-timeout 180 app
+        run: docker compose up --build --wait --wait-timeout 180 app worker
       - name: Verify endpoints, non-root user, database outage and recovery
         env:
           APP_VERSION: ${{ steps.meta.outputs.version }}
@@ -122,6 +122,7 @@ jobs:
       (github.ref == 'refs/heads/main' ||
        github.ref == 'refs/heads/feat/project-bootstrap' ||
        github.ref == 'refs/heads/feat/mlflow-pipeline' ||
+       github.ref == 'refs/heads/feat/rabbitmq-backpressure' ||
        startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10

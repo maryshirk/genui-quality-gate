@@ -1,6 +1,6 @@
 [project]
 name = "genui-quality-gate"
-version = "0.2.0"
+version = "0.3.0"
 description = "An asynchronous service for evaluating generated user interfaces"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -25,6 +25,8 @@ web = [
     "pandas>=2.3,<4",
     "beautifulsoup4>=4.14,<5",
     "skops>=0.16,<1",
+    "faststream[rabbit]==0.7.7",
+    "psutil>=7,<8",
 ]
 ml = [
     "mlflow==3.17.0",
@@ -45,6 +47,8 @@ dev = [
     "pytest-cov>=6,<8",
     "httpx>=0.28,<1",
     "asgi-lifespan>=2.1,<3",
+    "testcontainers[rabbitmq,postgres]==4.15.0",
+    "types-psutil>=7,<8",
 ]
 
 [tool.uv]
@@ -69,7 +73,7 @@ files = ["src", "scripts"]
 untyped_calls_exclude = ["nbformat"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg", "asyncpg.*", "sklearn", "sklearn.*", "pandas", "pandas.*"]
+module = ["asyncpg", "asyncpg.*", "sklearn", "sklearn.*", "pandas", "pandas.*", "docker", "docker.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -82,7 +86,10 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
-markers = ["integration: requires a real PostgreSQL instance (TEST_DATABASE_URL)"]
+markers = [
+    "integration: requires a real PostgreSQL instance (TEST_DATABASE_URL)",
+    "containers: starts isolated RabbitMQ and PostgreSQL using Testcontainers",
+]
 filterwarnings = ["error"]
 
 [tool.coverage.run]

@@ -45,7 +45,7 @@ class LoadedModel:
         if sorted(self.estimator.classes_) != [0, 1]:
             raise ValueError("Model must predict binary preference labels 0 and 1")
 
-    def _predict(self, prompt: str, html_a: str, html_b: str) -> Prediction:
+    def predict_sync(self, prompt: str, html_a: str, html_b: str) -> Prediction:
         import pandas as pd
 
         values = pd.DataFrame([{"prompt": prompt, "html_a": html_a, "html_b": html_b}])
@@ -66,7 +66,7 @@ class LoadedModel:
 
     async def predict(self, prompt: str, html_a: str, html_b: str) -> Prediction:
         async with self._lock:
-            return await asyncio.to_thread(self._predict, prompt, html_a, html_b)
+            return await asyncio.to_thread(self.predict_sync, prompt, html_a, html_b)
 
 
 def load_model(settings: Settings) -> LoadedModel:
