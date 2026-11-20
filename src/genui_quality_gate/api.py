@@ -3,10 +3,12 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
+from opentelemetry.trace import get_current_span
 from pydantic import BaseModel
 
+from genui_quality_gate import telemetry
 from genui_quality_gate.database import ComponentHealth, check_database
-from genui_quality_gate.logging import LOGGER_NAME
+from genui_quality_gate.logging import LOGGER_NAME, task_context
 from genui_quality_gate.queue import QueueUnavailable, TaskPublisher
 from genui_quality_gate.task_store import TaskRepository
 from genui_quality_gate.tasks import AcceptedTask, StoredTask, TaskEnvelope, TaskPayload
@@ -85,24 +87,33 @@ async def process(
 ) -> AcceptedTask:
     publisher: TaskPublisher | None = request.app.state.publisher
     retry_after = str(request.app.state.settings.retry_after_seconds)
-    if publisher is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Task queue unavailable",
-            headers={"Retry-After": retry_after},
-        )
     task = TaskEnvelope(payload=payload)
     if idempotency_key is not None:
         task.task_id = idempotency_key
-    try:
-        await publisher.publish(task)
-    except QueueUnavailable:
-        logger.warning("task_load_shed", extra={"request_id": request.state.request_id})
-        raise HTTPException(
-            status_code=503,
-            detail="Task queue full or temporarily unavailable",
-            headers={"Retry-After": retry_after, "X-Task-ID": str(task.task_id)},
-        ) from None
+    task_id = str(task.task_id)
+    request.state.task_id = task_id
+    get_current_span().set_attribute("task.id", task_id)
+    with task_context(task_id):
+        try:
+            if publisher is None:
+                raise QueueUnavailable("Publisher unavailable")
+            await publisher.publish(task)
+        except QueueUnavailable as error:
+            telemetry.failure(get_current_span(), error)
+            logger.warning(
+                "task_load_shed",
+                extra={
+                    "request_id": request.state.request_id,
+                    "status_code": 503,
+                    "broker_rejected": error.rejected,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Task queue full or temporarily unavailable",
+                headers={"Retry-After": retry_after, "X-Task-ID": task_id},
+            ) from None
+        logger.info("task_accepted")
     location = f"/api/v1/tasks/{task.task_id}"
     response.headers["Location"] = location
     return AcceptedTask(task_id=task.task_id, status_url=location)

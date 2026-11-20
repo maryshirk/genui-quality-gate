@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -8,8 +9,14 @@ from time import perf_counter
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from opentelemetry.trace import SpanKind, get_current_span
+
+from genui_quality_gate import telemetry
 from genui_quality_gate.inference import Prediction
+from genui_quality_gate.logging import LOGGER_NAME
 from genui_quality_gate.tasks import StoredTask
+
+logger = logging.getLogger(LOGGER_NAME)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS pipeline_tasks (
@@ -34,6 +41,7 @@ class TaskOutcome:
     attempts: int
     result: Prediction | None = None
     error_type: str | None = None
+    end_to_end_seconds: float | None = None
 
 
 class TaskRepository(Protocol):
@@ -88,36 +96,43 @@ class PostgresTaskStore:
             if record["status"] == "FAILED":
                 return TaskOutcome("failed", record["attempts"], error_type=record["error_type"])
             attempts = record["attempts"] + 1
+            get_current_span().set_attribute("messaging.delivery.attempt", attempts)
             started = perf_counter()
             try:
                 prediction = await work()
             except Exception as exc:
+                telemetry.failure(get_current_span(), exc)
+                logger.exception("task_processing_failed", extra={"attempt": attempts})
                 state: Literal["failed", "retry"] = (
                     "failed" if attempts >= self.max_attempts else "retry"
                 )
-                await connection.execute(
-                    "UPDATE pipeline_tasks SET attempts=$2, status=$3, error_type=$4, "
-                    "finished_at=CASE WHEN $3='FAILED' THEN clock_timestamp() ELSE NULL END "
-                    "WHERE task_id=$1",
-                    task_id,
-                    attempts,
-                    "FAILED" if state == "failed" else "PROCESSING",
-                    type(exc).__name__,
-                )
+                with telemetry.span("db.write_failure", kind=SpanKind.CLIENT):
+                    await connection.execute(
+                        "UPDATE pipeline_tasks SET attempts=$2, status=$3, error_type=$4, "
+                        "finished_at=CASE WHEN $3='FAILED' THEN clock_timestamp() ELSE NULL END "
+                        "WHERE task_id=$1",
+                        task_id,
+                        attempts,
+                        "FAILED" if state == "failed" else "PROCESSING",
+                        type(exc).__name__,
+                    )
                 return TaskOutcome(state, attempts, error_type=type(exc).__name__)
             inference_ms = (perf_counter() - started) * 1000
             latency_ms = max(0, (datetime.now(UTC) - record["created_at"]).total_seconds() * 1000)
-            await connection.execute(
-                "UPDATE pipeline_tasks SET status='SUCCEEDED', attempts=$2, result=$3::jsonb, "
-                "error_type=NULL, finished_at=clock_timestamp(), inference_ms=$4, "
-                "end_to_end_ms=$5 WHERE task_id=$1",
-                task_id,
-                attempts,
-                prediction.model_dump_json(),
-                inference_ms,
-                latency_ms,
+            with telemetry.span("db.write_result", kind=SpanKind.CLIENT):
+                await connection.execute(
+                    "UPDATE pipeline_tasks SET status='SUCCEEDED', attempts=$2, result=$3::jsonb, "
+                    "error_type=NULL, finished_at=clock_timestamp(), inference_ms=$4, "
+                    "end_to_end_ms=$5 WHERE task_id=$1",
+                    task_id,
+                    attempts,
+                    prediction.model_dump_json(),
+                    inference_ms,
+                    latency_ms,
+                )
+            return TaskOutcome(
+                "succeeded", attempts, prediction, end_to_end_seconds=latency_ms / 1000
             )
-            return TaskOutcome("succeeded", attempts, prediction)
 
     async def get(self, task_id: UUID) -> StoredTask | None:
         async with self.pool.acquire() as connection:

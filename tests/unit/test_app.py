@@ -301,7 +301,7 @@ async def test_request_logging_has_correlation_and_no_sensitive_data(
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
     ):
         response = await client.get(
-            "/healthz?token=private-token", headers={"x-request-id": "defense-demo-1"}
+            "/api/v1/version?token=private-token", headers={"x-request-id": "defense-demo-1"}
         )
         assert response.headers["x-request-id"] == "defense-demo-1"
         unknown = await client.get("/private-path-secret?token=hidden")
@@ -315,7 +315,7 @@ async def test_request_logging_has_correlation_and_no_sensitive_data(
     assert len(access) == 2
     assert access[0]["request_id"] == "defense-demo-1"
     assert access[0]["method"] == "GET"
-    assert access[0]["route"] == "/healthz"
+    assert access[0]["route"] == "/api/v1/version"
     assert access[0]["status_code"] == 200
     assert access[0]["duration_ms"] >= 0
     assert access[1]["route"] == "<unmatched>"

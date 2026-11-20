@@ -1,0 +1,59 @@
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: pipeline
+    folder: GenUI
+    interval: 10s
+    rules:
+      - uid: queue-fill
+        title: Очередь заполнена более чем на 90%
+        condition: B
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: Очередь {{ $labels.queue }} держится у лимита больше минуты
+        data:
+          - refId: A
+            datasourceUid: metrics
+            relativeTimeRange: {from: 60, to: 0}
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: max by (queue) (rabbitmq_detailed_queue_messages_ready) / on (queue) max by (queue) (genui_queue_ready_limit)
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.9]}
+      - uid: dead-letters
+        title: В DLQ есть сообщения
+        condition: B
+        for: 15s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: В {{ $labels.queue }} есть задачи для разбора
+        data:
+          - refId: A
+            datasourceUid: metrics
+            relativeTimeRange: {from: 60, to: 0}
+            model:
+              refId: A
+              instant: true
+              range: false
+              expr: max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~".*[.]dlq"})
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}

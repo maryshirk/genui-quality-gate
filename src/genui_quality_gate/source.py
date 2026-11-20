@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,9 @@ from time import perf_counter
 from typing import TextIO
 from uuid import UUID, uuid4, uuid5
 
+from genui_quality_gate import telemetry
 from genui_quality_gate.config import Settings
+from genui_quality_gate.logging import LOGGER_NAME, configure_logging, task_context
 from genui_quality_gate.queue import (
     QueueUnavailable,
     TaskPublisher,
@@ -19,6 +22,8 @@ from genui_quality_gate.queue import (
     declare_topology,
 )
 from genui_quality_gate.tasks import TaskEnvelope, TaskPayload
+
+logger = logging.getLogger(LOGGER_NAME)
 
 
 @dataclass
@@ -79,15 +84,44 @@ async def publish_file(
                 raise ValueError("A JSONL record exceeds the maximum task size")
             payload = TaskPayload.model_validate_json(line)
             task = TaskEnvelope(task_id=uuid5(checkpoint.batch_id, str(offset)), payload=payload)
-            retry = 0
-            while True:
-                try:
-                    await publisher.publish(task)
-                    break
-                except QueueUnavailable:
-                    rejected += 1
-                    await asyncio.sleep(min(1.0, retry_base * 2 ** min(retry, 6)))
-                    retry += 1
+            with (
+                task_context(str(task.task_id)),
+                telemetry.span(
+                    "source.task",
+                    attributes={"task.id": str(task.task_id), "batch.id": str(checkpoint.batch_id)},
+                ) as span,
+            ):
+                retry = 0
+                signals = telemetry.active.instruments
+                while True:
+                    try:
+                        await publisher.publish(task)
+                        break
+                    except QueueUnavailable as error:
+                        rejected += 1
+                        if error.rejected:
+                            signals.rejected.add(1)
+                        delay = min(1.0, retry_base * 2 ** min(retry, 6))
+                        retry += 1
+                        span.add_event(
+                            "broker.rejected" if error.rejected else "broker.unavailable",
+                            {"retry": retry, "wait.seconds": delay},
+                        )
+                        with telemetry.span("source.backoff", attributes={"retry": retry}):
+                            logger.warning(
+                                "source_backoff",
+                                extra={
+                                    "attempt": retry,
+                                    "wait_seconds": delay,
+                                    "batch_id": str(checkpoint.batch_id),
+                                    "broker_rejected": error.rejected,
+                                },
+                            )
+                            started = perf_counter()
+                            await asyncio.sleep(delay)
+                            signals.waited.add(perf_counter() - started)
+                signals.published.add(1)
+                logger.info("source_published", extra={"batch_id": str(checkpoint.batch_id)})
             checkpoint.offset = stream.tell()
             checkpoint.accepted += 1
             await asyncio.to_thread(checkpoint.save, checkpoint_path)
@@ -100,15 +134,22 @@ async def publish_file(
 
 async def run(source: Path, checkpoint: Path) -> None:
     settings = Settings()
-    broker = create_broker(settings)
-    try:
-        await broker.connect()
-        await declare_topology(broker, settings)
-        started = perf_counter()
-        result = await publish_file(source, checkpoint, TaskPublisher(broker, settings))
-        print(json.dumps(result | {"duration_seconds": perf_counter() - started}))
-    finally:
-        await broker.stop()
+    async with telemetry.observe("source") as signals:
+        configure_logging(signals.service)
+        broker = create_broker(settings)
+        try:
+            await broker.connect()
+            await declare_topology(broker, settings)
+            started = perf_counter()
+            result = await publish_file(source, checkpoint, TaskPublisher(broker, settings))
+            logger.info(
+                "batch_finished", extra=result | {"duration_seconds": perf_counter() - started}
+            )
+        except Exception:
+            logger.exception("batch_failed")
+            raise SystemExit(1) from None
+        finally:
+            await broker.stop()
 
 
 def main() -> None:

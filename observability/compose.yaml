@@ -1,0 +1,115 @@
+x-observability: &observability
+  networks: [backend]
+  logging:
+    driver: json-file
+    options:
+      max-size: 5m
+      max-file: "2"
+
+services:
+  alloy:
+    <<: *observability
+    image: grafana/alloy:${ALLOY_VERSION:-v1.11.3}
+    profiles: [logs, observability]
+    command: [run, --storage.path=/var/lib/alloy, /etc/alloy/config.alloy]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-genui-quality-gate}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./observability/alloy.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy
+    mem_limit: 160m
+    depends_on:
+      loki:
+        condition: service_healthy
+
+  loki:
+    <<: *observability
+    image: grafana/loki:${LOKI_VERSION:-3.5.5}
+    profiles: [logs, observability]
+    command: [-config.file=/etc/loki/local.yaml]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/local.yaml:ro
+      - loki_data:/loki
+    mem_limit: 320m
+    healthcheck:
+      test: [CMD, /busybox/wget, -q, -O, /dev/null, http://127.0.0.1:3100/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
+
+  otel-collector:
+    <<: *observability
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.139.0}
+    profiles: [traces, metrics, observability]
+    command: [--config=/etc/otelcol-contrib/config.yaml]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    mem_limit: 192m
+
+  tempo:
+    <<: *observability
+    image: grafana/tempo:${TEMPO_VERSION:-2.9.0}
+    profiles: [traces, observability]
+    command: [-config.file=/etc/tempo.yaml]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    mem_limit: 320m
+    healthcheck:
+      test: [CMD, /busybox/wget, -q, -O, /dev/null, http://127.0.0.1:3200/ready]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  victoria-metrics:
+    <<: *observability
+    image: victoriametrics/victoria-metrics:${VICTORIAMETRICS_VERSION:-v1.126.0}
+    profiles: [metrics, observability]
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -retentionPeriod=2d
+      - -memory.allowedPercent=35
+      - -opentelemetry.usePrometheusNaming
+      - -promscrape.config=/etc/victoriametrics/scrape.yaml
+    volumes:
+      - ./observability/scrape.yaml:/etc/victoriametrics/scrape.yaml:ro
+      - victoria_data:/victoria-metrics-data
+    mem_limit: 224m
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8428/health]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  grafana:
+    <<: *observability
+    image: grafana/grafana:${GRAFANA_VERSION:-12.2.1}
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-local-grafana-change-me}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    mem_limit: 288m
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:3000/api/health]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+networks:
+  backend:
+
+volumes:
+  alloy_data:
+  loki_data:
+  tempo_data:
+  victoria_data:
+  grafana_data:

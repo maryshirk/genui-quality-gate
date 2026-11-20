@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from time import time
 
-from aio_pika.exceptions import AMQPException, DeliveryError
+from aio_pika.exceptions import AMQPException, DeliveryError, PublishError
 from faststream.rabbit import Channel, RabbitBroker, RabbitQueue
 from faststream.rabbit.schemas.queue import ClassicQueueArgs
+from opentelemetry.trace import SpanKind
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from genui_quality_gate import telemetry
 from genui_quality_gate.config import Settings
+from genui_quality_gate.logging import task_context
 from genui_quality_gate.tasks import TaskEnvelope
 
 
@@ -40,7 +45,7 @@ async def declare_topology(broker: RabbitBroker, settings: Settings) -> None:
 
 
 class QueueUnavailable(Exception):
-    pass
+    rejected: bool = False
 
 
 class TaskPublisher:
@@ -60,6 +65,24 @@ class TaskPublisher:
             self.inflight -= 1
 
     async def publish(self, task: TaskEnvelope) -> None:
+        task_id = str(task.task_id)
+        with (
+            task_context(task_id),
+            telemetry.span(
+                "publish",
+                kind=SpanKind.PRODUCER,
+                attributes={
+                    "messaging.system": "rabbitmq",
+                    "messaging.destination.name": self.settings.queue_name,
+                    "task.id": task_id,
+                },
+            ),
+        ):
+            await self.send(task, task_id)
+
+    async def send(self, task: TaskEnvelope, task_id: str) -> None:
+        headers = {"genui-published-at": str(time())}
+        TraceContextTextMapPropagator().inject(headers)
         try:
             async with self.slot(), asyncio.timeout(self.settings.publish_timeout_seconds):
                 await self.broker.publish(
@@ -67,8 +90,12 @@ class TaskPublisher:
                     queue=self.settings.queue_name,
                     persist=True,
                     mandatory=True,
-                    message_id=str(task.task_id),
+                    message_id=task_id,
+                    correlation_id=task_id,
+                    headers={**headers},
                     timeout=self.settings.publish_timeout_seconds,
                 )
         except (AMQPException, DeliveryError, TimeoutError, ConnectionError, OSError) as exc:
-            raise QueueUnavailable(type(exc).__name__) from None
+            error = QueueUnavailable(type(exc).__name__)
+            error.rejected = isinstance(exc, DeliveryError) and not isinstance(exc, PublishError)
+            raise error from None

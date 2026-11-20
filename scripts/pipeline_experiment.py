@@ -290,7 +290,12 @@ def refresh_report(output: Path) -> None:
     report = json.loads(path.read_text())
     for result in report["results"]:
         log = Path("artifacts/backpressure") / result["queue"] / "source.log"
-        source = json.loads(log.read_text().splitlines()[-1])
+        records = (
+            json.loads(line)
+            for line in reversed(log.read_text().splitlines())
+            if line.startswith("{")
+        )
+        source = next(record for record in records if "duration_seconds" in record)
         result["source_duration_seconds"] = source["duration_seconds"]
         result["source_mean_rate"] = source["accepted"] / source["duration_seconds"]
         result["source_rejections"] = source["rejected"]

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from genui_quality_gate import telemetry
 from genui_quality_gate.api import router
 from genui_quality_gate.config import Settings
 from genui_quality_gate.database import DatabasePool, close_database_pool, create_database_pool
@@ -28,7 +29,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        configure_logging()
+        async with (
+            telemetry.observe(
+                "api",
+                configuration.queue_capacity if configuration.backpressure_enabled else None,
+                configuration.queue_name,
+            ),
+            connections(application),
+        ):
+            yield
+
+    @asynccontextmanager
+    async def connections(application: FastAPI) -> AsyncIterator[None]:
+        configure_logging(telemetry.active.service)
         pool: DatabasePool | None = None
         try:
             async with asyncio.timeout(configuration.health_timeout_seconds):
@@ -60,6 +73,7 @@ def create_app(
             application.state.pool = None
             logger.info("application_stopped")
 
+    configure_logging()
     application = FastAPI(
         title="GenUI Quality Gate",
         version=application_version(),

@@ -135,16 +135,20 @@ async def run() -> None:
                 "SELECT count(*) FROM pipeline_tasks WHERE task_id=$1", duplicate.task_id
             )
             poison_id = uuid4()
+            poison_trace_id = uuid4().hex
             await broker.publish(
                 {"task_id": str(poison_id), "payload": {"prompt": ""}},
                 queue=queue_name,
                 persist=True,
                 message_id=str(poison_id),
+                correlation_id=str(poison_id),
+                headers={"traceparent": f"00-{poison_trace_id}-{uuid4().hex[:16]}-01"},
             )
             failed = await result_ready(store, poison_id)
             assert failed.status == "FAILED" and failed.attempts == 3
             report["poison_attempts"] = failed.attempts
             report["poison_task_id"] = str(poison_id)
+            report["poison_trace_id"] = poison_trace_id
             await wait_active(http, worker, False)
 
             graceful = TaskEnvelope(payload=payload)

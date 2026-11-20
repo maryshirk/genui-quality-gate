@@ -1,5 +1,25 @@
 name: genui-quality-gate
 
+include:
+  - path: observability/compose.yaml
+    project_directory: .
+
+x-telemetry: &telemetry
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  GENUI_ENVIRONMENT: ${GENUI_ENVIRONMENT:-local}
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+  OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment.name=local}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-1}
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+  OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-otlp}
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1}
+  OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-5000}
+  OTEL_METRIC_EXPORT_TIMEOUT: ${OTEL_METRIC_EXPORT_TIMEOUT:-1000}
+  OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-2048}
+  OTEL_BSP_SCHEDULE_DELAY: ${OTEL_BSP_SCHEDULE_DELAY:-1000}
+
 x-logging: &logging
   driver: json-file
   options:
@@ -16,6 +36,8 @@ services:
         BUILD_SHA: ${BUILD_SHA:-development}
     init: true
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: api
       GENUI_DATABASE_URL: postgresql://${POSTGRES_USER:-genui}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-genui}
       GENUI_HEALTH_TIMEOUT_SECONDS: "2"
       GENUI_DB_SHUTDOWN_TIMEOUT_SECONDS: "2"
@@ -47,6 +69,9 @@ services:
     command: [uvicorn, genui_quality_gate.worker:create_worker_app, --factory, --host, 0.0.0.0, --port, "8001", --no-access-log, --timeout-graceful-shutdown, "70"]
     init: true
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: worker
+      MLFLOW_ENABLE_ARTIFACTS_PROGRESS_BAR: "false"
       GENUI_DATABASE_URL: postgresql://${POSTGRES_USER:-genui}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-genui}
       GENUI_TRACKING_URI: http://mlflow:5000
       GENUI_MODEL_NAME: ${GENUI_MODEL_NAME:-genui-pairwise-quality}
@@ -113,6 +138,8 @@ services:
     command: [python, -m, genui_quality_gate.source, /data/tasks.jsonl, --checkpoint, /state/checkpoint.json]
     init: true
     environment:
+      <<: *telemetry
+      OTEL_SERVICE_NAME: source
       GENUI_RABBIT_URL: amqp://genui:${RABBITMQ_PASSWORD:-local-rabbit-change-me}@rabbitmq:5672/
       GENUI_QUEUE_NAME: ${GENUI_QUEUE_NAME:-genui.tasks}
       GENUI_QUEUE_CAPACITY: ${GENUI_QUEUE_CAPACITY:-20}
@@ -227,6 +254,3 @@ volumes:
   postgres_data:
   mlflow_backend:
   mlflow_artifacts:
-
-networks:
-  backend:

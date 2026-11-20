@@ -29,6 +29,40 @@ docker compose --profile batch run --rm source
 
 `make train` нужен, если в MLflow ещё нет модели с alias `champion`. API работает на порту 8000, MLflow — 5001, RabbitMQ Management — 15672. Доступ только с localhost; пользователь RabbitMQ — `genui`, пароль — `RABBITMQ_PASSWORD`.
 
+## Наблюдаемость
+
+Стандартный `logging` приводит записи приложения и библиотек к одному формату. JSON в stdout сохраняет поля для поиска и даёт Alloy читать логи контейнеров без файлов внутри них. Alloy находит контейнеры по метке Compose-проекта и отправляет записи в Loki. В Grafana Explore для поиска задачи используется `{service=~"api|source|worker"} | json | task_id="<id>"`. В Loki индексируются только `service`, `level` и `env`, чтобы число потоков не росло вместе с числом задач. Из записи можно открыть трейс в Tempo, из спана — логи всего трейса.
+
+OpenTelemetry передаёт `traceparent` через RabbitMQ и переносит контекст в executor. Один трейс на задачу показывает публикацию, ожидание при переполнении, `messaging.queue.wait_seconds`, inference и запись в БД. Пакет ищется по `batch_id`. Tempo хранит трейсы локально, Collector ограничивает память до пакетирования и экспорта. На стенде `parentbased_always_on` сохраняет все новые трейсы. При сотнях задач в секунду подойдёт tail sampling в Collector: сохранять ошибки и медленные трейсы, из остальных оставлять выборку.
+
+VictoriaMetrics принимает OTLP и выполняет PromQL-запросы Grafana. Выбран push, потому что короткий запуск источника может завершиться между опросами. Источник отправляет последний набор метрик при завершении. RabbitMQ опрашивается отдельно на `:15692`, Ready и Unacked берутся из плагина. Бакеты HTTP и inference плотнее около 5–250 мс и продолжаются до 30 с. При 5 маршрутах и 5 статусах оценка для HTTP — `5 × 5 × (1 + 17 + 2) = 500` рядов. На экземпляр воркера приходится до 42 рядов, на пару очередей — 4 ряда RabbitMQ. Идентификаторы задач и трейсов в метриках не используются.
+
+### Запуск стенда
+
+Подготовить модель из раздела «Запуск» и выполнить команды ниже.
+
+```bash
+OTEL_SDK_DISABLED=false docker compose --profile observability up -d --build --wait
+uv run --locked --group ml python -m scripts.pipeline_experiment prepare --count 850 \
+  --input data/pipeline/observability.jsonl
+OTEL_SDK_DISABLED=false docker compose --profile batch run --rm source \
+  python -m genui_quality_gate.source /data/observability.jsonl --checkpoint /state/observability.json
+```
+
+Grafana доступна на `localhost:3000`, пользователь `admin`, пароль `GRAFANA_ADMIN_PASSWORD`. Дашборд «Конвейер», источники данных и алерты создаются из файлов. Обычный `docker compose up` запускает приложение без сервисов наблюдаемости. Профили `logs`, `traces` и `metrics` включают отдельные сигналы. Для запуска одного OTLP-сигнала задать `OTEL_SDK_DISABLED=false` и выключить второй экспортёр через `OTEL_TRACES_EXPORTER=none` или `OTEL_METRICS_EXPORTER=none`. Для повторного прогона того же файла указать новый путь checkpoint.
+
+Второй воркер включается командой `OTEL_SDK_DISABLED=false docker compose up -d --no-deps --scale worker=2 worker`.
+
+Для проверки DLQ можно запустить `scripts.pipeline_verify` с `OTEL_SDK_DISABLED=false`. Он отправляет некорректное сообщение в отдельную очередь и выводит `poison_task_id` и `poison_trace_id` для поиска в Grafana.
+
+Алерт очереди срабатывает при заполнении более 90% в течение минуты, чтобы отсеять короткие всплески. Для DLQ одного сообщения достаточно, задержка 15 секунд отсекает краткое появление при выгрузке. Для сравнения скоростей смотреть `sum(rate(genui_source_published_total[30s]))` и `sum(rate(genui_worker_tasks_total{outcome="ok"}[30s]))`. Для SLO «99% успешных задач быстрее 6 с» сравнить долю `rate(genui_task_duration_seconds_bucket{le="6"}[5m])` от `rate(genui_task_duration_seconds_count[5m])`, суммируя по воркерам.
+
+Бюджет наблюдаемости — 1504 MiB: Alloy 160, Loki 320, Collector 192, Tempo 320, VictoriaMetrics 224 и Grafana 288. Сырые сигналы хранятся двое суток. Состояние Grafana и позиции Alloy сохраняются в именованных томах.
+
+Локальный прогон 20.11.2026, задержка inference 250 мс. Все 850 задач сохранены в PostgreSQL. Ready держалась на 19–20 из 20. В установившихся интервалах источник и воркеры давали около 3,9 задач/с с одним воркером и 7,8 задач/с с двумя. Оба алерта дошли до Firing. Суммарное потребление памяти шести контейнеров наблюдаемости по `docker stats --no-stream` составило 381,7 MiB с одним воркером и 404,3 MiB с двумя.
+
+При SIGTERM воркер закончил активную задачу, при остановленном Collector новая задача завершилась успешно. Экспорт идёт в фоне через ограниченные буферы, поэтому при длительном сбое часть трейсов и метрик теряется.
+
 ## Ограничение нагрузки и доставка
 
 - Очередь durable, сообщения persistent, публикация использует `mandatory` и publisher confirms. `GENUI_QUEUE_CAPACITY=20` задаёт `x-max-length`, `x-overflow=reject-publish` сообщает источнику о переполнении отрицательным подтверждением. Источник повторяет текущую запись с задержкой от 20 мс до 1 с; после успеха задержка сбрасывается. Фиксированного ограничения частоты нет.
@@ -94,7 +128,7 @@ make experiment
 uv run --locked --group ml --env-file .env python -m scripts.pipeline_verify
 ```
 
-`TestRabbitBroker` проверяет обработчики; Testcontainers запускает реальные RabbitMQ и PostgreSQL для проверки переполнения, повторов, DLQ, идемпотентности и доступности health-check во время inference. Локально прошли 142 теста, покрытие с ветвлениями — 97.10%.
+`TestRabbitBroker` проверяет обработчики; Testcontainers запускает реальные RabbitMQ и PostgreSQL для проверки переполнения, повторов, DLQ, идемпотентности и доступности health-check во время inference. В работе по backpressure прошли 142 теста с покрытием ветвлений 97,10%. После добавления наблюдаемости прошли 145 тестов с покрытием 96,05%.
 
 Проверка с моделью из MLflow: `503` за 4.61 мс с `Retry-After: 2`, отклонённого ID в БД нет; ошибочная задача отправлена в DLQ после трёх попыток. При SIGTERM активная задача сохранена, процесс завершился за 2.13 с. После SIGKILL сообщение доставлено повторно, результат остался единственным.
 
