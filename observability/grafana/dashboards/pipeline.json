@@ -1,0 +1,456 @@
+{
+  "uid": "genui-pipeline",
+  "title": "Конвейер",
+  "schemaVersion": 41,
+  "tags": [
+    "GenUI"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "queue",
+        "label": "Очередь",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "metrics"
+        },
+        "query": {
+          "query": "label_values(genui_queue_ready_limit, queue)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values(genui_queue_ready_limit, queue)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "worker",
+        "label": "Воркер",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "metrics"
+        },
+        "query": {
+          "query": "label_values(genui_worker_tasks_total, service_instance_id)",
+          "refId": "StandardVariableQuery"
+        },
+        "definition": "label_values(genui_worker_tasks_total, service_instance_id)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Рабочая очередь",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~\"$queue\"})",
+          "legendFormat": "Ready · {{queue}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max by (queue) (rabbitmq_detailed_queue_messages_unacked{queue=~\"$queue\"})",
+          "legendFormat": "Unacked · {{queue}}",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "max by (queue) (genui_queue_ready_limit{queue=~\"$queue\"})",
+          "legendFormat": "Лимит Ready · {{queue}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Скорость публикации и обработки",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(genui_source_published_total[$__rate_interval]))",
+          "legendFormat": "Источник",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(genui_worker_tasks_total{outcome=\"ok\"}[$__rate_interval]))",
+          "legendFormat": "Воркеры · всего",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (service_instance_id) (rate(genui_worker_tasks_total{outcome=\"ok\",service_instance_id=~\"$worker\"}[$__rate_interval]))",
+          "legendFormat": "Воркер · {{service_instance_id}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Длительность inference",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(genui_inference_duration_seconds_bucket{service_instance_id=~\"$worker\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(genui_inference_duration_seconds_bucket{service_instance_id=~\"$worker\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(genui_inference_duration_seconds_bucket{service_instance_id=~\"$worker\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Длительность POST",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(genui_http_duration_seconds_bucket{route=~\"/api/v1/tasks|/process\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(genui_http_duration_seconds_bucket{route=~\"/api/v1/tasks|/process\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(genui_http_duration_seconds_bucket{route=~\"/api/v1/tasks|/process\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Память процессов RSS",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "genui_process_rss_bytes{service_name=\"source\"}",
+          "legendFormat": "Источник",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "genui_process_rss_bytes{service_name=\"worker\",service_instance_id=~\"$worker\"}",
+          "legendFormat": "Воркер · {{service_instance_id}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Доля ответов 503",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(genui_http_requests_total{route=~\"/api/v1/tasks|/process\",status=\"503\"}[$__rate_interval])) or 0 * sum(rate(genui_http_requests_total{route=~\"/api/v1/tasks|/process\"}[$__rate_interval]))) / sum(rate(genui_http_requests_total{route=~\"/api/v1/tasks|/process\"}[$__rate_interval]))",
+          "legendFormat": "503",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Отказы брокера источнику",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(genui_source_rejected_total[$__rate_interval]))",
+          "legendFormat": "NACK",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Сообщения в DLQ",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (queue) (rabbitmq_detailed_queue_messages_ready{queue=~\".*[.]dlq\"})",
+          "legendFormat": "{{queue}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Полное время задачи",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(genui_task_duration_seconds_bucket{service_instance_id=~\"$worker\"}[$__rate_interval])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(genui_task_duration_seconds_bucket{service_instance_id=~\"$worker\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(genui_task_duration_seconds_bucket{service_instance_id=~\"$worker\"}[$__rate_interval])))",
+          "legendFormat": "p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Задачи в работе",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "metrics"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "genui_worker_inflight{service_instance_id=~\"$worker\"}",
+          "legendFormat": "Воркер · {{service_instance_id}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Последние ошибки",
+      "datasource": {
+        "type": "loki",
+        "uid": "logs"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 8
+      },
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service=~\"api|source|worker\", level=~\"ERROR|CRITICAL\"}"
+        }
+      ]
+    }
+  ]
+}

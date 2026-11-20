@@ -1,0 +1,28 @@
+FROM ghcr.io/astral-sh/uv:0.12.24@sha256:3af4716e991d6956a41e573eab705d0ee08500cd829ed30293eb8472f372c65a AS uv
+FROM python:3.13-slim-bookworm AS builder
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+WORKDIR /app
+COPY --from=uv /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --only-group ml --no-install-project
+
+FROM python:3.13-slim-bookworm AS runtime
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    XDG_CACHE_HOME=/tmp/cache
+WORKDIR /app
+RUN groupadd --gid 10001 mlflow && useradd --uid 10001 --gid mlflow --no-create-home mlflow \
+    && mkdir /mlartifacts && chown mlflow:mlflow /mlartifacts
+COPY --from=builder /app/.venv /app/.venv
+USER 10001:10001
+EXPOSE 5000
+STOPSIGNAL SIGTERM
+CMD ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000", "--workers", "1"]

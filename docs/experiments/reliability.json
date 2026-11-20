@@ -1,0 +1,21 @@
+{
+  "queue": "verify.6b1cd445",
+  "overload_latency_ms": 4.611374984961003,
+  "overload_status": 503,
+  "retry_after": "2",
+  "rejected_task_absent": true,
+  "duplicate_result_rows": 1,
+  "poison_attempts": 3,
+  "poison_task_id": "f6b7e0c8-b0ef-40fd-bf92-a2a623c40db4",
+  "graceful_exit_code": 143,
+  "graceful_seconds": 2.1275364579923917,
+  "graceful_active_task_completed": true,
+  "model": {
+    "name": "genui-pairwise-quality",
+    "version": "2",
+    "alias": "champion",
+    "run_id": "f279cd390c37428abe28c17c6797f2f8"
+  },
+  "sigkill_redelivery_succeeded": true,
+  "sigkill_result_rows": 1
+}
